@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+openai>=1.0.0
+pypdf
+python-docx
+reportlab
+requests
+beautifulsoup4
