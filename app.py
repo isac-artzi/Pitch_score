@@ -818,8 +818,8 @@ if 'uploaded_docs' not in st.session_state:
 # Header
 st.title("Investor Proposal Vetting Tool")
 st.subheader("Comprehensive analysis for startup evaluation")
-st.markdown("##### Copyright © 2023 - All Rights Reserved - Isac Artzi & SenSym, LLC")
-st.caption("Make data-driven investment decisions with confidence")
+st.markdown("##### Copyright © 2025 - All Rights Reserved - Isac Artzi & SenSym, LLC")
+st.caption("Make data-driven investment decisions with confidence - version 1.0.0")
 
 # Privacy Notice Popup
 with st.expander("🔒 Privacy Notice & Disclaimer", expanded=False):
