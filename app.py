@@ -24,6 +24,20 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
+
+def clean_markdown(text):
+    """Remove markdown formatting that causes display issues"""
+    if not text:
+        return text
+    # Remove asterisks and underscores
+    text = text.replace('*', '').replace('_', '')
+    # Fix common AI formatting issues
+    text = text.replace('•', '-')  # Replace bullet points
+    # Ensure proper spacing after periods
+    text = re.sub(r'\.([A-Z])', r'. \1', text)
+    return text
+
+
 # Page configuration
 st.set_page_config(
     page_title="Investor Proposal Vetting Tool",
@@ -60,16 +74,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Initialize session state
-if 'mode' not in st.session_state:
-    st.session_state.mode = 'Light'
-if 'api_key' not in st.session_state:
-    st.session_state.api_key = ''
-if 'form_data' not in st.session_state:
-    st.session_state.form_data = {}
-if 'uploaded_docs' not in st.session_state:
-    st.session_state.uploaded_docs = {}
-
 # Helper functions for document processing
 def extract_text_from_pdf(file):
     """Extract text from PDF file"""
@@ -105,31 +109,40 @@ def process_uploaded_file(uploaded_file):
     if uploaded_file is None:
         return ""
     
-    file_type = uploaded_file.type
-    
-    if file_type == "application/pdf":
-        return extract_text_from_pdf(uploaded_file)
-    elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        return extract_text_from_docx(uploaded_file)
-    elif file_type == "text/plain":
-        return extract_text_from_txt(uploaded_file)
-    else:
-        return "Unsupported file type. Please upload PDF, DOCX, or TXT files."
+    try:
+        file_type = uploaded_file.type
+        
+        if file_type == "application/pdf":
+            return extract_text_from_pdf(uploaded_file)
+        elif file_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            return extract_text_from_docx(uploaded_file)
+        elif file_type == "text/plain":
+            return extract_text_from_txt(uploaded_file)
+        else:
+            return "Unsupported file type. Please upload PDF, DOCX, or TXT files."
+    except Exception as e:
+        return f"Error processing file: {str(e)}"
 
 # URL processing functions
 def is_valid_url(text):
     """Check if text contains a valid URL"""
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    )
-    return url_pattern.search(text) is not None
+    try:
+        url_pattern = re.compile(
+            r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        )
+        return url_pattern.search(text) is not None
+    except:
+        return False
 
 def extract_urls_from_text(text):
     """Extract all URLs from text"""
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    )
-    return url_pattern.findall(text)
+    try:
+        url_pattern = re.compile(
+            r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
+        )
+        return url_pattern.findall(text)
+    except:
+        return []
 
 def fetch_url_content(url, timeout=10):
     """Fetch content from URL with appropriate handling for different content types"""
@@ -194,24 +207,617 @@ def process_text_with_urls(text):
     if not text or not is_valid_url(text):
         return text
     
-    urls = extract_urls_from_text(text)
-    
-    if not urls:
+    try:
+        urls = extract_urls_from_text(text)
+        
+        if not urls:
+            return text
+        
+        # Combine original text with fetched URL content
+        combined_content = text + "\n\n--- Additional Content from URLs ---\n"
+        
+        for url in urls[:3]:  # Limit to first 3 URLs to avoid too much content
+            with st.spinner(f"Fetching content from {url}..."):
+                url_content = fetch_url_content(url)
+                combined_content += f"\n{url_content}\n"
+        
+        return combined_content
+    except Exception as e:
+        st.warning(f"⚠️ Could not fetch URL content: {str(e)}")
         return text
+
+# Analysis Functions
+def calculate_comprehensive_metrics(data):
+    """Calculate comprehensive metrics for analysis"""
+    try:
+        metrics = {}
+        
+        # Unit Economics
+        if data.get('cac', 0) > 0:
+            metrics['ltv_cac_ratio'] = data.get('ltv', 0) / data['cac']
+            metrics['payback_period'] = data['cac'] / (data.get('arr', 0) / 12 / max(data.get('current_customers', 1), 1)) if data.get('arr', 0) > 0 else float('inf')
+        else:
+            metrics['ltv_cac_ratio'] = 0
+            metrics['payback_period'] = float('inf')
+        
+        # Burn Multiple
+        if data.get('burn_rate', 0) > 0 and data.get('current_mrr', 0) > 0:
+            net_burn = data['burn_rate'] - data['current_mrr']
+            if net_burn > 0 and data.get('monthly_growth_rate', 0) > 0:
+                metrics['burn_multiple'] = net_burn / (data['current_mrr'] * data['monthly_growth_rate'] / 100)
+            else:
+                metrics['burn_multiple'] = 0
+        else:
+            metrics['burn_multiple'] = float('inf')
+        
+        # Efficiency Score (0-100)
+        ltv_cac_score = min(100, (metrics['ltv_cac_ratio'] / 3) * 50) if metrics['ltv_cac_ratio'] > 0 else 0
+        margin_score = data.get('gross_margin', 0) * 0.5
+        # Cap the total at 100
+        metrics['efficiency_score'] = min(100, (ltv_cac_score + margin_score))
+        
+        # Growth Score (0-100)
+        growth_rate = data.get('monthly_growth_rate', 0)
+        if growth_rate >= 20:
+            metrics['growth_score'] = 100
+        elif growth_rate >= 10:
+            metrics['growth_score'] = 80
+        elif growth_rate >= 5:
+            metrics['growth_score'] = 60
+        else:
+            metrics['growth_score'] = growth_rate * 10
+        
+        # Market Score (0-100)
+        tam = data.get('tam', 0)
+        if tam >= 10000:  # $10B+
+            market_size_score = 100
+        elif tam >= 1000:  # $1B+
+            market_size_score = 80
+        elif tam >= 100:   # $100M+
+            market_size_score = 60
+        else:
+            market_size_score = 40
+        
+        # Market capture potential
+        if tam > 0 and data.get('som', 0) > 0:
+            capture_ratio = (data['som'] / tam) * 100
+            capture_score = min(100, capture_ratio * 20)  # 5% capture = 100 score
+        else:
+            capture_score = 50
+        
+        metrics['market_score'] = (market_size_score + capture_score) / 2
+        
+        # Team Score (0-100)
+        team_size_score = min(100, data.get('team_size', 0) * 5)
+        technical_ratio = (data.get('technical_team', 0) / max(data.get('team_size', 1), 1)) * 100
+        advisor_score = min(100, data.get('advisors_count', 0) * 20)
+        metrics['team_score'] = (team_size_score + technical_ratio + advisor_score) / 3
+        
+        # Traction Score (0-100)
+        customer_score = min(100, data.get('current_customers', 0) / 10)
+        revenue_score = min(100, (data.get('arr', 0) / 100000) * 100)  # $100k ARR = 100
+        funding_score = min(100, (data.get('funding_raised', 0) / 1000000) * 50)  # $2M = 100
+        metrics['traction_score'] = (customer_score + revenue_score + funding_score) / 3
+        
+        # Risk Score (0-100, higher is better)
+        runway_score = min(100, (data.get('runway_months', 0) / 18) * 100)  # 18 months = 100
+        churn_score = max(0, 100 - (data.get('churn_rate', 0) * 10))  # 10% churn = 0 score
+        metrics['risk_score'] = (runway_score + churn_score) / 2
+        
+        # Overall Investment Score
+        weights = {
+            'efficiency': 0.20,
+            'growth': 0.20,
+            'market': 0.15,
+            'team': 0.15,
+            'traction': 0.20,
+            'risk': 0.10
+        }
+        
+        metrics['overall_score'] = (
+            metrics['efficiency_score'] * weights['efficiency'] +
+            metrics['growth_score'] * weights['growth'] +
+            metrics['market_score'] * weights['market'] +
+            metrics['team_score'] * weights['team'] +
+            metrics['traction_score'] * weights['traction'] +
+            metrics['risk_score'] * weights['risk']
+        )
+        
+        return metrics
+    except Exception as e:
+        st.error(f"⚠️ Error calculating metrics: {str(e)}")
+        return {
+            'ltv_cac_ratio': 0,
+            'efficiency_score': 0,
+            'growth_score': 0,
+            'market_score': 0,
+            'team_score': 0,
+            'traction_score': 0,
+            'risk_score': 0,
+            'overall_score': 0,
+            'burn_multiple': 0,
+            'payback_period': 0
+        }
+
+def generate_ai_insights(data, api_key):
+    """Generate comprehensive AI insights for Pro mode"""
+    if not api_key:
+        return {"error": "Please provide an OpenAI API key for Pro mode analysis."}
     
-    # Combine original text with fetched URL content
-    combined_content = text + "\n\n--- Additional Content from URLs ---\n"
+    if not api_key.startswith('sk-'):
+        return {"error": "Invalid API key format. OpenAI API keys should start with 'sk-'"}
     
-    for url in urls[:3]:  # Limit to first 3 URLs to avoid too much content
-        with st.spinner(f"Fetching content from {url}..."):
-            url_content = fetch_url_content(url)
-            combined_content += f"\n{url_content}\n"
+    try:
+        # Initialize OpenAI client
+        client = OpenAI(api_key=api_key)
+        
+        # Combine all text data including uploaded documents
+        all_text = f"""
+        Company: {data.get('company_name', 'N/A')}
+        Industry: {data.get('industry', 'N/A')}
+        Stage: {data.get('stage', 'N/A')}
+        
+        BUSINESS & PRODUCT:
+        Problem/Solution: {data.get('problem_solution', 'N/A')}
+        Market Info: {data.get('market_info', 'N/A')}
+        Business Model: {data.get('business_model_desc', 'N/A')}
+        Uniqueness: {data.get('uniqueness', 'N/A')}
+        IP Assets: {data.get('ip_assets', 'N/A')}
+        Progress: {data.get('progress', 'N/A')}
+        
+        TEAM:
+        Experience: {data.get('team_experience', 'N/A')}
+        Structure: {data.get('team_structure', 'N/A')}
+        Team Size: {data.get('team_size', 0)}
+        
+        FINANCIALS:
+        MRR: ${data.get('current_mrr', 0)}
+        ARR: ${data.get('arr', 0)}
+        Burn Rate: ${data.get('burn_rate', 0)}
+        Runway: {data.get('runway_months', 0)} months
+        CAC: ${data.get('cac', 0)}
+        LTV: ${data.get('ltv', 0)}
+        Gross Margin: {data.get('gross_margin', 0)}%
+        Funding Seeking: ${data.get('funding_seeking', 0)}
+        
+        MARKET & COMPETITION:
+        TAM: ${data.get('tam', 0)}M
+        Competitors: {data.get('competitors', 'N/A')}
+        Competitive Advantage: {data.get('competitive_advantage', 'N/A')}
+        Customer Acquisition: {data.get('customer_acquisition', 'N/A')}
+        
+        RISKS:
+        Legal: {data.get('legal_risks', 'N/A')}
+        Regulatory: {data.get('regulatory_risks', 'N/A')}
+        Other: {data.get('other_risks', 'N/A')}
+        
+        EXIT STRATEGY: {data.get('exit_strategy', 'N/A')}
+        """
+        
+        # Add uploaded document content
+        for doc_type, content in data.get('uploaded_docs', {}).items():
+            if content:
+                all_text += f"\n\n{doc_type.upper()} DOCUMENT CONTENT:\n{content[:2000]}..."
+        
+        prompt = f"""
+        You are a seasoned venture capital investment partner analyzing a startup proposal. 
+        Based on the comprehensive information provided, generate a detailed investment analysis.
+        
+        {all_text}
+        
+        YOU MUST respond with ONLY a valid JSON object (no markdown, no explanation, no formatting).
+        The JSON must have this exact structure:
+        {{
+            "investment_thesis": "2-3 sentence executive summary of the investment opportunity",
+            "investment_recommendation": "STRONG BUY or BUY or HOLD or PASS",
+            "valuation_assessment": "Assessment of the proposed valuation and terms",
+            "key_strengths": ["strength 1", "strength 2", "strength 3", "strength 4"],
+            "key_concerns": ["concern 1", "concern 2", "concern 3", "concern 4"],
+            "due_diligence_priorities": ["priority 1", "priority 2", "priority 3"],
+            "growth_potential": "Assessment of growth trajectory and scalability",
+            "team_assessment": "Evaluation of team capability and experience",
+            "market_timing": "Assessment of market timing and opportunity window",
+            "competitive_position": "Analysis of competitive positioning and moat",
+            "financial_health": "Assessment of unit economics and financial sustainability",
+            "risk_assessment": "Overall risk level: LOW or MEDIUM or HIGH with explanation",
+            "recommended_terms": "Suggested investment terms or modifications",
+            "post_investment_support": ["support area 1", "support area 2", "support area 3"],
+            "comparable_exits": "Similar companies and their exit multiples",
+            "investment_score": 85
+        }}
+        
+        Remember: Return ONLY the JSON object, nothing else.
+        """
+        
+        # Use the model that works in your JS
+        response = client.chat.completions.create(
+            model='gpt-4o-mini',  # Using your working model
+            messages=[
+                {
+                    'role': 'system', 
+                    'content': 'You are a venture capital investment assistant. You must always respond with valid JSON only, no markdown formatting, no code blocks, no explanations.'
+                },
+                {
+                    'role': 'user', 
+                    'content': prompt
+                }
+            ],
+            temperature=0.7,
+            max_tokens=2000  # Increased for comprehensive analysis
+        )
+        
+        # Get the response
+        response_text = response.choices[0].message.content.strip()
+        
+        # Clean up common issues
+        # Remove markdown code blocks if present
+        if '```json' in response_text:
+            response_text = response_text.split('```json')[1].split('```')[0].strip()
+        elif '```' in response_text:
+            response_text = response_text.split('```')[1].split('```')[0].strip()
+        
+        # Remove any non-JSON content before the first {
+        if not response_text.startswith('{'):
+            start = response_text.find('{')
+            if start != -1:
+                response_text = response_text[start:]
+        
+        # Remove any non-JSON content after the last }
+        if response_text.endswith('}'):
+            end = response_text.rfind('}')
+            response_text = response_text[:end+1]
+        
+        # Parse JSON
+        try:
+            return json.loads(response_text)
+        except json.JSONDecodeError as e:
+            print(f"JSON Parse Error: {e}")
+            print(f"Response was: {response_text[:500]}")
+            
+            # Return a structured error response
+            return {
+                "error": "JSON parsing failed",
+                "investment_thesis": "Unable to parse AI response. Please try again.",
+                "investment_recommendation": "HOLD",
+                "valuation_assessment": "Analysis incomplete",
+                "key_strengths": ["Data provided", "Comprehensive information", "Clear metrics", "Established team"],
+                "key_concerns": ["Technical analysis error", "Please retry", "Consider manual review", "System processing issue"],
+                "due_diligence_priorities": ["Retry analysis", "Manual review", "Verify data"],
+                "growth_potential": "Requires reanalysis",
+                "team_assessment": "Team information provided",
+                "market_timing": "Market analysis pending",
+                "competitive_position": "Competitive data available",
+                "financial_health": "Financial metrics provided",
+                "risk_assessment": "MEDIUM - Analysis incomplete",
+                "recommended_terms": "Rerun analysis for recommendations",
+                "post_investment_support": ["Technical review", "Strategic planning", "Market analysis"],
+                "comparable_exits": "Data pending",
+                "investment_score": 50
+            }
     
-    return combined_content
+    except Exception as e:
+        error_msg = str(e)
+        if "api_key" in error_msg.lower():
+            return {"error": "Invalid API key. Please check your OpenAI API key and try again."}
+        elif "rate" in error_msg.lower():
+            return {"error": "API rate limit reached. Please wait a moment and try again."}
+        else:
+            return {"error": f"AI analysis failed: {error_msg}"}
+
+def generate_pdf_report(form_data, metrics, ai_insights=None, recommendations=[]):
+    """Generate a professional PDF report with charts and analysis"""
+    
+    # Create a temporary directory for images
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Create PDF buffer
+        pdf_buffer = io.BytesIO()
+        
+        # Create the PDF document
+        doc = SimpleDocTemplate(
+            pdf_buffer,
+            pagesize=letter,
+            rightMargin=72,
+            leftMargin=72,
+            topMargin=72,
+            bottomMargin=18,
+        )
+        
+        # Container for the 'Flowable' objects
+        elements = []
+        
+        # Define styles
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            textColor=colors.HexColor('#1f4788'),
+            spaceAfter=30,
+            alignment=TA_CENTER
+        )
+        
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=16,
+            textColor=colors.HexColor('#1f4788'),
+            spaceAfter=12,
+            spaceBefore=12
+        )
+        
+        subheading_style = ParagraphStyle(
+            'CustomSubHeading',
+            parent=styles['Heading3'],
+            fontSize=14,
+            textColor=colors.HexColor('#2c5282'),
+            spaceAfter=10
+        )
+        
+        # Cover Page
+        elements.append(Spacer(1, 2*inch))
+        elements.append(Paragraph("INVESTMENT ANALYSIS REPORT", title_style))
+        elements.append(Spacer(1, 0.5*inch))
+        elements.append(Paragraph(f"<b>{form_data['company_name']}</b>", title_style))
+        elements.append(Spacer(1, 0.3*inch))
+        elements.append(Paragraph(f"{form_data['industry']} | {form_data['stage']}", styles['Normal']))
+        elements.append(Spacer(1, 0.5*inch))
+        elements.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
+        elements.append(PageBreak())
+        
+        # Executive Summary
+        elements.append(Paragraph("Executive Summary", heading_style))
+        
+        exec_summary_data = [
+            ['Overall Investment Score:', f"{metrics['overall_score']:.0f}/100"],
+            ['Company Stage:', form_data['stage']],
+            ['Industry:', form_data['industry']],
+            ['Funding Seeking:', f"${form_data['funding_seeking']:,.0f}"],
+            ['Current ARR:', f"${form_data['arr']:,.0f}"],
+            ['Runway:', f"{form_data['runway_months']} months"]
+        ]
+        
+        exec_table = Table(exec_summary_data, colWidths=[3*inch, 3*inch])
+        exec_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
+        ]))
+        elements.append(exec_table)
+        elements.append(Spacer(1, 0.5*inch))
+        
+        # Score Breakdown
+        elements.append(Paragraph("Score Breakdown", subheading_style))
+        
+        score_data = [
+            ['Metric', 'Score', 'Status'],
+            ['Efficiency', f"{metrics['efficiency_score']:.0f}/100", '✓' if metrics['efficiency_score'] >= 70 else '✗'],
+            ['Growth', f"{metrics['growth_score']:.0f}/100", '✓' if metrics['growth_score'] >= 70 else '✗'],
+            ['Market', f"{metrics['market_score']:.0f}/100", '✓' if metrics['market_score'] >= 70 else '✗'],
+            ['Team', f"{metrics['team_score']:.0f}/100", '✓' if metrics['team_score'] >= 70 else '✗'],
+            ['Traction', f"{metrics['traction_score']:.0f}/100", '✓' if metrics['traction_score'] >= 70 else '✗'],
+            ['Risk Management', f"{metrics['risk_score']:.0f}/100", '✓' if metrics['risk_score'] >= 70 else '✗']
+        ]
+        
+        score_table = Table(score_data, colWidths=[2.5*inch, 2*inch, 1.5*inch])
+        score_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 12),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(score_table)
+        elements.append(PageBreak())
+        
+        # Key Metrics
+        elements.append(Paragraph("Key Financial Metrics", heading_style))
+        
+        financial_data = [
+            ['Metric', 'Value', 'Benchmark', 'Status'],
+            ['LTV/CAC Ratio', f"{metrics['ltv_cac_ratio']:.2f}", '≥ 3.0', '✓' if metrics['ltv_cac_ratio'] >= 3 else '✗'],
+            ['Monthly Growth Rate', f"{form_data['monthly_growth_rate']}%", '≥ 10%', '✓' if form_data['monthly_growth_rate'] >= 10 else '✗'],
+            ['Gross Margin', f"{form_data['gross_margin']}%", '≥ 70%', '✓' if form_data['gross_margin'] >= 70 else '✗'],
+            ['Burn Rate', f"${form_data['burn_rate']:,.0f}", 'Sustainable', '✓' if form_data['runway_months'] >= 12 else '✗'],
+            ['Churn Rate', f"{form_data['churn_rate']}%", '≤ 5%', '✓' if form_data['churn_rate'] <= 5 else '✗']
+        ]
+        
+        financial_table = Table(financial_data, colWidths=[2*inch, 1.5*inch, 1.5*inch, 1*inch])
+        financial_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
+        ]))
+        elements.append(financial_table)
+        elements.append(Spacer(1, 0.5*inch))
+        
+        # Market Opportunity
+        elements.append(Paragraph("Market Opportunity Analysis", subheading_style))
+        
+        market_data = [
+            ['Market Segment', 'Size'],
+            ['Total Addressable Market (TAM)', f"${form_data['tam']}M"],
+            ['Serviceable Addressable Market (SAM)', f"${form_data['sam']}M"],
+            ['Serviceable Obtainable Market (SOM)', f"${form_data['som']}M"],
+            ['Current Market Capture', f"${form_data['arr']/1000000:.2f}M"]
+        ]
+        
+        market_table = Table(market_data, colWidths=[4*inch, 2*inch])
+        market_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c5282')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black)
+        ]))
+        elements.append(market_table)
+        elements.append(PageBreak())
+        
+        # Business Overview
+        elements.append(Paragraph("Business Overview", heading_style))
+        
+        # Problem & Solution
+        elements.append(Paragraph("Problem & Solution", subheading_style))
+        elements.append(Paragraph(form_data.get('problem_solution', 'Not provided'), styles['Normal']))
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Business Model
+        elements.append(Paragraph("Business Model", subheading_style))
+        elements.append(Paragraph(form_data.get('business_model_desc', 'Not provided'), styles['Normal']))
+        elements.append(Spacer(1, 0.3*inch))
+        
+        # Competitive Advantage
+        elements.append(Paragraph("Competitive Advantage", subheading_style))
+        elements.append(Paragraph(form_data.get('competitive_advantage', 'Not provided'), styles['Normal']))
+        elements.append(PageBreak())
+        
+        # Team Analysis
+        elements.append(Paragraph("Team Analysis", heading_style))
+        
+        team_stats_data = [
+            ['Team Size', str(form_data['team_size'])],
+            ['Technical Team', str(form_data['technical_team'])],
+            ['Advisors', str(form_data['advisors_count'])],
+            ['Technical Ratio', f"{(form_data['technical_team']/max(form_data['team_size'], 1)*100):.0f}%"]
+        ]
+        
+        team_table = Table(team_stats_data, colWidths=[3*inch, 3*inch])
+        team_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.lightblue),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 11),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 1, colors.white)
+        ]))
+        elements.append(team_table)
+        elements.append(Spacer(1, 0.3*inch))
+        
+        elements.append(Paragraph("Team Experience", subheading_style))
+        elements.append(Paragraph(form_data.get('team_experience', 'Not provided'), styles['Normal']))
+        
+        # AI Insights (if available)
+        if ai_insights and "error" not in ai_insights:
+            elements.append(PageBreak())
+            elements.append(Paragraph("AI-Powered Investment Analysis", heading_style))
+            
+            # Investment Thesis
+            elements.append(Paragraph("Investment Thesis", subheading_style))
+            elements.append(Paragraph(ai_insights.get('investment_thesis', 'Not available'), styles['Normal']))
+            elements.append(Spacer(1, 0.3*inch))
+            
+            # Recommendation
+            rec = ai_insights.get('investment_recommendation', 'HOLD')
+            rec_color = colors.green if 'BUY' in rec else colors.orange if 'HOLD' in rec else colors.red
+            
+            rec_style = ParagraphStyle(
+                'RecStyle',
+                parent=styles['Normal'],
+                fontSize=14,
+                textColor=rec_color,
+                alignment=TA_CENTER
+            )
+            elements.append(Paragraph(f"<b>Recommendation: {rec.split()[0]}</b>", rec_style))
+            elements.append(Spacer(1, 0.3*inch))
+            
+            # Strengths and Concerns
+            col_data = []
+            strengths = ai_insights.get('key_strengths', [])
+            concerns = ai_insights.get('key_concerns', [])
+            
+            for i in range(max(len(strengths), len(concerns))):
+                strength = f"• {strengths[i]}" if i < len(strengths) else ""
+                concern = f"• {concerns[i]}" if i < len(concerns) else ""
+                col_data.append([strength, concern])
+            
+            if col_data:
+                sc_table = Table(col_data, colWidths=[3*inch, 3*inch])
+                sc_table.setStyle(TableStyle([
+                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10)
+                ]))
+                
+                elements.append(Paragraph("Strengths vs Concerns", subheading_style))
+                header_data = [["Key Strengths", "Key Concerns"]]
+                header_table = Table(header_data, colWidths=[3*inch, 3*inch])
+                header_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#1f4788')),
+                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold')
+                ]))
+                elements.append(header_table)
+                elements.append(sc_table)
+        
+        # Recommendations
+        elements.append(PageBreak())
+        elements.append(Paragraph("Recommendations & Action Items", heading_style))
+        
+        if recommendations:
+            for i, rec in enumerate(recommendations, 1):
+                elements.append(Paragraph(f"<b>{i}. {rec['area']}</b>", subheading_style))
+                elements.append(Paragraph(f"Issue: {rec['issue']}", styles['Normal']))
+                elements.append(Paragraph(f"Action: {rec['action']}", styles['Normal']))
+                elements.append(Spacer(1, 0.2*inch))
+        else:
+            elements.append(Paragraph("No specific recommendations. The company shows strong metrics across all areas.", styles['Normal']))
+        
+        # Build PDF
+        doc.build(elements)
+        
+        # Get PDF value
+        pdf_buffer.seek(0)
+        pdf_data = pdf_buffer.read()
+        
+        # Clean up temp directory
+        for file in os.listdir(temp_dir):
+            os.remove(os.path.join(temp_dir, file))
+        os.rmdir(temp_dir)
+        
+        return pdf_data
+        
+    except Exception as e:
+        # Clean up on error
+        if os.path.exists(temp_dir):
+            for file in os.listdir(temp_dir):
+                os.remove(os.path.join(temp_dir, file))
+            os.rmdir(temp_dir)
+        raise e
+
+# Initialize session state
+if 'mode' not in st.session_state:
+    st.session_state.mode = 'Light'
+if 'api_key' not in st.session_state:
+    st.session_state.api_key = ''
+if 'form_data' not in st.session_state:
+    st.session_state.form_data = {}
+if 'uploaded_docs' not in st.session_state:
+    st.session_state.uploaded_docs = {}
 
 # Header
 st.title("🚀 Investor Proposal Vetting Tool")
-st.markdown("### Comprehensive analysis for startup evaluation")
+st.subheader("Comprehensive analysis for startup evaluation")
+st.caption("Make data-driven investment decisions with confidence")
 
 # Privacy Notice Popup
 with st.expander("🔒 Privacy Notice & Disclaimer", expanded=False):
@@ -249,6 +855,10 @@ if st.session_state.mode == "Pro":
         help="Your API key is not stored and is used only for this session"
     )
     st.session_state.api_key = api_key
+    
+    # Validate API key format
+    if api_key and not api_key.startswith('sk-'):
+        st.error("⚠️ Invalid API key format. OpenAI API keys should start with 'sk-'")
 
 # Questionnaire Form
 st.markdown("---")
@@ -585,972 +1195,516 @@ with st.form("proposal_form"):
     # Submit button
     submitted = st.form_submit_button("🔍 Analyze Proposal", use_container_width=True)
 
-# Analysis Functions
-def calculate_comprehensive_metrics(data):
-    """Calculate comprehensive metrics for analysis"""
-    metrics = {}
-    
-    # Unit Economics
-    if data.get('cac', 0) > 0:
-        metrics['ltv_cac_ratio'] = data.get('ltv', 0) / data['cac']
-        metrics['payback_period'] = data['cac'] / (data.get('arr', 0) / 12 / max(data.get('current_customers', 1), 1)) if data.get('arr', 0) > 0 else float('inf')
-    else:
-        metrics['ltv_cac_ratio'] = 0
-        metrics['payback_period'] = float('inf')
-    
-    # Burn Multiple
-    if data.get('burn_rate', 0) > 0 and data.get('current_mrr', 0) > 0:
-        net_burn = data['burn_rate'] - data['current_mrr']
-        if net_burn > 0 and data.get('monthly_growth_rate', 0) > 0:
-            metrics['burn_multiple'] = net_burn / (data['current_mrr'] * data['monthly_growth_rate'] / 100)
-        else:
-            metrics['burn_multiple'] = 0
-    else:
-        metrics['burn_multiple'] = float('inf')
-    
-    # Efficiency Score (0-100)
-    ltv_cac_score = min(100, (metrics['ltv_cac_ratio'] / 3) * 50) if metrics['ltv_cac_ratio'] > 0 else 0
-    margin_score = data.get('gross_margin', 0) * 0.5
-    metrics['efficiency_score'] = (ltv_cac_score + margin_score)
-    
-    # Growth Score (0-100)
-    growth_rate = data.get('monthly_growth_rate', 0)
-    if growth_rate >= 20:
-        metrics['growth_score'] = 100
-    elif growth_rate >= 10:
-        metrics['growth_score'] = 80
-    elif growth_rate >= 5:
-        metrics['growth_score'] = 60
-    else:
-        metrics['growth_score'] = growth_rate * 10
-    
-    # Market Score (0-100)
-    tam = data.get('tam', 0)
-    if tam >= 10000:  # $10B+
-        market_size_score = 100
-    elif tam >= 1000:  # $1B+
-        market_size_score = 80
-    elif tam >= 100:   # $100M+
-        market_size_score = 60
-    else:
-        market_size_score = 40
-    
-    # Market capture potential
-    if tam > 0 and data.get('som', 0) > 0:
-        capture_ratio = (data['som'] / tam) * 100
-        capture_score = min(100, capture_ratio * 20)  # 5% capture = 100 score
-    else:
-        capture_score = 50
-    
-    metrics['market_score'] = (market_size_score + capture_score) / 2
-    
-    # Team Score (0-100)
-    team_size_score = min(100, data.get('team_size', 0) * 5)
-    technical_ratio = (data.get('technical_team', 0) / max(data.get('team_size', 1), 1)) * 100
-    advisor_score = min(100, data.get('advisors_count', 0) * 20)
-    metrics['team_score'] = (team_size_score + technical_ratio + advisor_score) / 3
-    
-    # Traction Score (0-100)
-    customer_score = min(100, data.get('current_customers', 0) / 10)
-    revenue_score = min(100, (data.get('arr', 0) / 100000) * 100)  # $100k ARR = 100
-    funding_score = min(100, (data.get('funding_raised', 0) / 1000000) * 50)  # $2M = 100
-    metrics['traction_score'] = (customer_score + revenue_score + funding_score) / 3
-    
-    # Risk Score (0-100, higher is better)
-    runway_score = min(100, (data.get('runway_months', 0) / 18) * 100)  # 18 months = 100
-    churn_score = max(0, 100 - (data.get('churn_rate', 0) * 10))  # 10% churn = 0 score
-    metrics['risk_score'] = (runway_score + churn_score) / 2
-    
-    # Overall Investment Score
-    weights = {
-        'efficiency': 0.20,
-        'growth': 0.20,
-        'market': 0.15,
-        'team': 0.15,
-        'traction': 0.20,
-        'risk': 0.10
-    }
-    
-    metrics['overall_score'] = (
-        metrics['efficiency_score'] * weights['efficiency'] +
-        metrics['growth_score'] * weights['growth'] +
-        metrics['market_score'] * weights['market'] +
-        metrics['team_score'] * weights['team'] +
-        metrics['traction_score'] * weights['traction'] +
-        metrics['risk_score'] * weights['risk']
-    )
-    
-    return metrics
-
-def generate_pdf_report(form_data, metrics, ai_insights=None, recommendations=[]):
-    """Generate a professional PDF report with charts and analysis"""
-    
-    # Create a temporary directory for images
-    temp_dir = tempfile.mkdtemp()
-    
-    try:
-        # Create PDF buffer
-        pdf_buffer = io.BytesIO()
-        
-        # Create the PDF document
-        doc = SimpleDocTemplate(
-            pdf_buffer,
-            pagesize=letter,
-            rightMargin=72,
-            leftMargin=72,
-            topMargin=72,
-            bottomMargin=18,
-        )
-        
-        # Container for the 'Flowable' objects
-        elements = []
-        
-        # Define styles
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=styles['Heading1'],
-            fontSize=24,
-            textColor=colors.HexColor('#1f4788'),
-            spaceAfter=30,
-            alignment=TA_CENTER
-        )
-        
-        heading_style = ParagraphStyle(
-            'CustomHeading',
-            parent=styles['Heading2'],
-            fontSize=16,
-            textColor=colors.HexColor('#1f4788'),
-            spaceAfter=12,
-            spaceBefore=12
-        )
-        
-        subheading_style = ParagraphStyle(
-            'CustomSubHeading',
-            parent=styles['Heading3'],
-            fontSize=14,
-            textColor=colors.HexColor('#2c5282'),
-            spaceAfter=10
-        )
-        
-        # Cover Page
-        elements.append(Spacer(1, 2*inch))
-        elements.append(Paragraph("INVESTMENT ANALYSIS REPORT", title_style))
-        elements.append(Spacer(1, 0.5*inch))
-        elements.append(Paragraph(f"<b>{form_data['company_name']}</b>", title_style))
-        elements.append(Spacer(1, 0.3*inch))
-        elements.append(Paragraph(f"{form_data['industry']} | {form_data['stage']}", styles['Normal']))
-        elements.append(Spacer(1, 0.5*inch))
-        elements.append(Paragraph(f"Generated: {datetime.now().strftime('%B %d, %Y')}", styles['Normal']))
-        elements.append(PageBreak())
-        
-        # Executive Summary
-        elements.append(Paragraph("Executive Summary", heading_style))
-        
-        exec_summary_data = [
-            ['Overall Investment Score:', f"{metrics['overall_score']:.0f}/100"],
-            ['Company Stage:', form_data['stage']],
-            ['Industry:', form_data['industry']],
-            ['Funding Seeking:', f"${form_data['funding_seeking']:,.0f}"],
-            ['Current ARR:', f"${form_data['arr']:,.0f}"],
-            ['Runway:', f"{form_data['runway_months']} months"]
-        ]
-        
-        exec_table = Table(exec_summary_data, colWidths=[3*inch, 3*inch])
-        exec_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.white),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (0, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
-            ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey)
-        ]))
-        elements.append(exec_table)
-        elements.append(Spacer(1, 0.5*inch))
-        
-        # Score Breakdown
-        elements.append(Paragraph("Score Breakdown", subheading_style))
-        
-        score_data = [
-            ['Metric', 'Score', 'Status'],
-            ['Efficiency', f"{metrics['efficiency_score']:.0f}/100", '✓' if metrics['efficiency_score'] >= 70 else '✗'],
-            ['Growth', f"{metrics['growth_score']:.0f}/100", '✓' if metrics['growth_score'] >= 70 else '✗'],
-            ['Market', f"{metrics['market_score']:.0f}/100", '✓' if metrics['market_score'] >= 70 else '✗'],
-            ['Team', f"{metrics['team_score']:.0f}/100", '✓' if metrics['team_score'] >= 70 else '✗'],
-            ['Traction', f"{metrics['traction_score']:.0f}/100", '✓' if metrics['traction_score'] >= 70 else '✗'],
-            ['Risk Management', f"{metrics['risk_score']:.0f}/100", '✓' if metrics['risk_score'] >= 70 else '✗']
-        ]
-        
-        score_table = Table(score_data, colWidths=[2.5*inch, 2*inch, 1.5*inch])
-        score_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black)
-        ]))
-        elements.append(score_table)
-        elements.append(PageBreak())
-        
-        # Key Metrics
-        elements.append(Paragraph("Key Financial Metrics", heading_style))
-        
-        financial_data = [
-            ['Metric', 'Value', 'Benchmark', 'Status'],
-            ['LTV/CAC Ratio', f"{metrics['ltv_cac_ratio']:.2f}", '≥ 3.0', '✓' if metrics['ltv_cac_ratio'] >= 3 else '✗'],
-            ['Monthly Growth Rate', f"{form_data['monthly_growth_rate']}%", '≥ 10%', '✓' if form_data['monthly_growth_rate'] >= 10 else '✗'],
-            ['Gross Margin', f"{form_data['gross_margin']}%", '≥ 70%', '✓' if form_data['gross_margin'] >= 70 else '✗'],
-            ['Burn Rate', f"${form_data['burn_rate']:,.0f}", 'Sustainable', '✓' if form_data['runway_months'] >= 12 else '✗'],
-            ['Churn Rate', f"{form_data['churn_rate']}%", '≤ 5%', '✓' if form_data['churn_rate'] <= 5 else '✗']
-        ]
-        
-        financial_table = Table(financial_data, colWidths=[2*inch, 1.5*inch, 1.5*inch, 1*inch])
-        financial_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4788')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 11),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.white),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black),
-            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')
-        ]))
-        elements.append(financial_table)
-        elements.append(Spacer(1, 0.5*inch))
-        
-        # Market Opportunity
-        elements.append(Paragraph("Market Opportunity Analysis", subheading_style))
-        
-        market_data = [
-            ['Market Segment', 'Size'],
-            ['Total Addressable Market (TAM)', f"${form_data['tam']}M"],
-            ['Serviceable Addressable Market (SAM)', f"${form_data['sam']}M"],
-            ['Serviceable Obtainable Market (SOM)', f"${form_data['som']}M"],
-            ['Current Market Capture', f"${form_data['arr']/1000000:.2f}M"]
-        ]
-        
-        market_table = Table(market_data, colWidths=[4*inch, 2*inch])
-        market_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2c5282')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, -1), 11),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.lightgrey),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black)
-        ]))
-        elements.append(market_table)
-        elements.append(PageBreak())
-        
-        # Business Overview
-        elements.append(Paragraph("Business Overview", heading_style))
-        
-        # Problem & Solution
-        elements.append(Paragraph("Problem & Solution", subheading_style))
-        elements.append(Paragraph(form_data.get('problem_solution', 'Not provided'), styles['Normal']))
-        elements.append(Spacer(1, 0.3*inch))
-        
-        # Business Model
-        elements.append(Paragraph("Business Model", subheading_style))
-        elements.append(Paragraph(form_data.get('business_model_desc', 'Not provided'), styles['Normal']))
-        elements.append(Spacer(1, 0.3*inch))
-        
-        # Competitive Advantage
-        elements.append(Paragraph("Competitive Advantage", subheading_style))
-        elements.append(Paragraph(form_data.get('competitive_advantage', 'Not provided'), styles['Normal']))
-        elements.append(PageBreak())
-        
-        # Team Analysis
-        elements.append(Paragraph("Team Analysis", heading_style))
-        
-        team_stats_data = [
-            ['Team Size', str(form_data['team_size'])],
-            ['Technical Team', str(form_data['technical_team'])],
-            ['Advisors', str(form_data['advisors_count'])],
-            ['Technical Ratio', f"{(form_data['technical_team']/max(form_data['team_size'], 1)*100):.0f}%"]
-        ]
-        
-        team_table = Table(team_stats_data, colWidths=[3*inch, 3*inch])
-        team_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, -1), colors.lightblue),
-            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
-            ('FONTSIZE', (0, 0), (-1, -1), 11),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
-            ('GRID', (0, 0), (-1, -1), 1, colors.white)
-        ]))
-        elements.append(team_table)
-        elements.append(Spacer(1, 0.3*inch))
-        
-        elements.append(Paragraph("Team Experience", subheading_style))
-        elements.append(Paragraph(form_data.get('team_experience', 'Not provided'), styles['Normal']))
-        
-        # AI Insights (if available)
-        if ai_insights and "error" not in ai_insights:
-            elements.append(PageBreak())
-            elements.append(Paragraph("AI-Powered Investment Analysis", heading_style))
-            
-            # Investment Thesis
-            elements.append(Paragraph("Investment Thesis", subheading_style))
-            elements.append(Paragraph(ai_insights.get('investment_thesis', 'Not available'), styles['Normal']))
-            elements.append(Spacer(1, 0.3*inch))
-            
-            # Recommendation
-            rec = ai_insights.get('investment_recommendation', 'HOLD')
-            rec_color = colors.green if 'BUY' in rec else colors.orange if 'HOLD' in rec else colors.red
-            
-            rec_style = ParagraphStyle(
-                'RecStyle',
-                parent=styles['Normal'],
-                fontSize=14,
-                textColor=rec_color,
-                alignment=TA_CENTER
-            )
-            elements.append(Paragraph(f"<b>Recommendation: {rec.split()[0]}</b>", rec_style))
-            elements.append(Spacer(1, 0.3*inch))
-            
-            # Strengths and Concerns
-            col_data = []
-            strengths = ai_insights.get('key_strengths', [])
-            concerns = ai_insights.get('key_concerns', [])
-            
-            for i in range(max(len(strengths), len(concerns))):
-                strength = f"• {strengths[i]}" if i < len(strengths) else ""
-                concern = f"• {concerns[i]}" if i < len(concerns) else ""
-                col_data.append([strength, concern])
-            
-            if col_data:
-                sc_table = Table(col_data, colWidths=[3*inch, 3*inch])
-                sc_table.setStyle(TableStyle([
-                    ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 10)
-                ]))
-                
-                elements.append(Paragraph("Strengths vs Concerns", subheading_style))
-                header_data = [["Key Strengths", "Key Concerns"]]
-                header_table = Table(header_data, colWidths=[3*inch, 3*inch])
-                header_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#1f4788')),
-                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.whitesmoke),
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold')
-                ]))
-                elements.append(header_table)
-                elements.append(sc_table)
-        
-        # Recommendations
-        elements.append(PageBreak())
-        elements.append(Paragraph("Recommendations & Action Items", heading_style))
-        
-        if recommendations:
-            for i, rec in enumerate(recommendations, 1):
-                elements.append(Paragraph(f"<b>{i}. {rec['area']}</b>", subheading_style))
-                elements.append(Paragraph(f"Issue: {rec['issue']}", styles['Normal']))
-                elements.append(Paragraph(f"Action: {rec['action']}", styles['Normal']))
-                elements.append(Spacer(1, 0.2*inch))
-        else:
-            elements.append(Paragraph("No specific recommendations. The company shows strong metrics across all areas.", styles['Normal']))
-        
-        # Build PDF
-        doc.build(elements)
-        
-        # Get PDF value
-        pdf_buffer.seek(0)
-        pdf_data = pdf_buffer.read()
-        
-        # Clean up temp directory
-        for file in os.listdir(temp_dir):
-            os.remove(os.path.join(temp_dir, file))
-        os.rmdir(temp_dir)
-        
-        return pdf_data
-        
-    except Exception as e:
-        # Clean up on error
-        if os.path.exists(temp_dir):
-            for file in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, file))
-            os.rmdir(temp_dir)
-        raise e
-    """Generate comprehensive AI insights for Pro mode"""
-    if not api_key:
-        return {"error": "Please provide an OpenAI API key for Pro mode analysis."}
-    
-    try:
-        # Initialize OpenAI client
-        client = OpenAI(api_key=api_key)
-        
-        # Combine all text data including uploaded documents
-        all_text = f"""
-        Company: {data.get('company_name', 'N/A')}
-        Industry: {data.get('industry', 'N/A')}
-        Stage: {data.get('stage', 'N/A')}
-        
-        BUSINESS & PRODUCT:
-        Problem/Solution: {data.get('problem_solution', 'N/A')}
-        Market Info: {data.get('market_info', 'N/A')}
-        Business Model: {data.get('business_model_desc', 'N/A')}
-        Uniqueness: {data.get('uniqueness', 'N/A')}
-        IP Assets: {data.get('ip_assets', 'N/A')}
-        Progress: {data.get('progress', 'N/A')}
-        
-        TEAM:
-        Experience: {data.get('team_experience', 'N/A')}
-        Structure: {data.get('team_structure', 'N/A')}
-        Team Size: {data.get('team_size', 0)}
-        
-        FINANCIALS:
-        MRR: ${data.get('current_mrr', 0)}
-        ARR: ${data.get('arr', 0)}
-        Burn Rate: ${data.get('burn_rate', 0)}
-        Runway: {data.get('runway_months', 0)} months
-        CAC: ${data.get('cac', 0)}
-        LTV: ${data.get('ltv', 0)}
-        Gross Margin: {data.get('gross_margin', 0)}%
-        Funding Seeking: ${data.get('funding_seeking', 0)}
-        
-        MARKET & COMPETITION:
-        TAM: ${data.get('tam', 0)}M
-        Competitors: {data.get('competitors', 'N/A')}
-        Competitive Advantage: {data.get('competitive_advantage', 'N/A')}
-        Customer Acquisition: {data.get('customer_acquisition', 'N/A')}
-        
-        RISKS:
-        Legal: {data.get('legal_risks', 'N/A')}
-        Regulatory: {data.get('regulatory_risks', 'N/A')}
-        Other: {data.get('other_risks', 'N/A')}
-        
-        EXIT STRATEGY: {data.get('exit_strategy', 'N/A')}
-        """
-        
-        # Add uploaded document content
-        for doc_type, content in data.get('uploaded_docs', {}).items():
-            if content:
-                all_text += f"\n\n{doc_type.upper()} DOCUMENT CONTENT:\n{content[:2000]}..."  # Limit to prevent token overflow
-        
-        prompt = f"""
-        You are a seasoned venture capital investment partner analyzing a startup proposal. 
-        Based on the comprehensive information provided, generate a detailed investment analysis.
-        
-        {all_text}
-        
-        Provide a comprehensive analysis in the following JSON format:
-        {{
-            "investment_thesis": "2-3 sentence executive summary of the investment opportunity",
-            "investment_recommendation": "STRONG BUY / BUY / HOLD / PASS with reasoning",
-            "valuation_assessment": "Assessment of the proposed valuation and terms",
-            "key_strengths": ["strength 1", "strength 2", "strength 3", "strength 4"],
-            "key_concerns": ["concern 1", "concern 2", "concern 3", "concern 4"],
-            "due_diligence_priorities": ["priority 1", "priority 2", "priority 3"],
-            "growth_potential": "Assessment of growth trajectory and scalability",
-            "team_assessment": "Evaluation of team capability and experience",
-            "market_timing": "Assessment of market timing and opportunity window",
-            "competitive_position": "Analysis of competitive positioning and moat",
-            "financial_health": "Assessment of unit economics and financial sustainability",
-            "risk_assessment": "Overall risk level: LOW / MEDIUM / HIGH with explanation",
-            "recommended_terms": "Suggested investment terms or modifications",
-            "post_investment_support": ["support area 1", "support area 2", "support area 3"],
-            "comparable_exits": "Similar companies and their exit multiples",
-            "investment_score": 85
-        }}
-        
-        Be specific, data-driven, and provide actionable insights.
-        """
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=1500
-        )
-        
-        return json.loads(response.choices[0].message.content)
-    
-    except Exception as e:
-        return {"error": f"AI analysis failed: {str(e)}"}
-
 # Process form submission
 if submitted:
-    # Collect all form data
-    form_data = {
-        # Basic Info
-        'company_name': company_name,
-        'founding_year': founding_year,
-        'website': website,
-        'industry': industry,
-        'stage': stage,
-        'location': location,
+    try:
+        # Show URL processing notice
+        url_fields_to_check = ['problem_solution', 'market_info', 'business_model_desc', 
+                              'uniqueness', 'progress', 'team_experience', 'competitors',
+                              'competitive_advantage', 'customer_acquisition']
         
-        # Business & Product
-        'problem_solution': problem_solution,
-        'market_info': market_info,
-        'tam': tam,
-        'sam': sam,
-        'som': som,
-        'business_model_desc': business_model_desc,
-        'revenue_model': revenue_model,
-        'pricing_model': pricing_model,
-        'uniqueness': uniqueness,
-        'ip_assets': ip_assets,
-        'progress': progress,
-        
-        # Team
-        'team_experience': team_experience,
-        'team_structure': team_structure,
-        'team_size': team_size,
-        'technical_team': technical_team,
-        'advisors_count': advisors_count,
-        'team_dynamics': team_dynamics,
-        'hiring_strategy': hiring_strategy,
-        
-        # Financials
-        'funding_raised': funding_raised,
-        'funding_seeking': funding_seeking,
-        'funding_type': funding_type,
-        'valuation': valuation,
-        'use_of_funds': use_of_funds,
-        'current_mrr': current_mrr,
-        'arr': arr,
-        'burn_rate': burn_rate,
-        'runway_months': runway_months,
-        'gross_margin': gross_margin,
-        'operating_margin': operating_margin,
-        'cac': cac,
-        'ltv': ltv,
-        'revenue_streams': revenue_streams,
-        'revenue_projection_1y': revenue_projection_1y,
-        'revenue_projection_3y': revenue_projection_3y,
-        'profitability_timeline': profitability_timeline,
-        
-        # Market & Competition
-        'competitors': competitors,
-        'competitive_advantage': competitive_advantage,
-        'market_growth': market_growth,
-        'customer_acquisition': customer_acquisition,
-        'current_customers': current_customers,
-        'monthly_growth_rate': monthly_growth_rate,
-        'churn_rate': churn_rate,
-        
-        # Risks & Strategy
-        'legal_risks': legal_risks,
-        'regulatory_risks': regulatory_risks,
-        'other_risks': other_risks,
-        'exit_strategy': exit_strategy
-    }
-    
-    # Process uploaded documents
-    uploaded_docs = {}
-    doc_mapping = {
-        'problem_doc': problem_doc,
-        'market_doc': market_doc,
-        'business_plan_doc': business_plan_doc,
-        'team_doc': team_doc,
-        'financial_doc': financial_doc,
-        'competitive_doc': competitive_analysis_doc,
-        'additional_doc': additional_doc
-    }
-    
-    for doc_name, doc_file in doc_mapping.items():
-        if doc_file is not None:
-            uploaded_docs[doc_name] = process_uploaded_file(doc_file)
-    
-    form_data['uploaded_docs'] = uploaded_docs
-    
-    # Validation
-    required_fields = ['company_name', 'problem_solution', 'market_info', 'business_model_desc',
-                      'uniqueness', 'team_experience', 'team_structure', 'funding_seeking',
-                      'use_of_funds', 'cac', 'ltv', 'burn_rate', 'runway_months',
-                      'competitors', 'competitive_advantage', 'customer_acquisition', 'other_risks']
-    
-    missing_fields = [field for field in required_fields if not form_data.get(field)]
-    
-    if missing_fields:
-        st.error(f"Please fill in all required fields: {', '.join(missing_fields)}")
-    else:
-        # Calculate metrics
-        st.markdown("---")
-        st.header("📊 Comprehensive Analysis Results")
-        
-        metrics = calculate_comprehensive_metrics(form_data)
-        
-        # Display key metrics dashboard
-        st.subheader("🎯 Key Performance Indicators")
-        
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        
-        with col1:
-            st.metric("LTV/CAC Ratio", f"{metrics['ltv_cac_ratio']:.2f}", 
-                     "✅ Good" if metrics['ltv_cac_ratio'] >= 3 else "⚠️ Needs Work")
-        
-        with col2:
-            st.metric("Efficiency Score", f"{metrics['efficiency_score']:.0f}/100")
-        
-        with col3:
-            st.metric("Growth Score", f"{metrics['growth_score']:.0f}/100")
-        
-        with col4:
-            st.metric("Market Score", f"{metrics['market_score']:.0f}/100")
-        
-        with col5:
-            st.metric("Team Score", f"{metrics['team_score']:.0f}/100")
-        
-        with col6:
-            st.metric("Traction Score", f"{metrics['traction_score']:.0f}/100")
-        
-        # Overall Investment Score
-        st.markdown("### 🏆 Overall Investment Score")
-        
-        score_color = "green" if metrics['overall_score'] >= 70 else "orange" if metrics['overall_score'] >= 50 else "red"
-        
-        fig_gauge = go.Figure(go.Indicator(
-            mode = "gauge+number+delta",
-            value = metrics['overall_score'],
-            domain = {'x': [0, 1], 'y': [0, 1]},
-            title = {'text': "Investment Readiness Score", 'font': {'size': 24}},
-            delta = {'reference': 70, 'increasing': {'color': "green"}},
-            gauge = {
-                'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
-                'bar': {'color': score_color},
-                'bgcolor': "white",
-                'borderwidth': 2,
-                'bordercolor': "gray",
-                'steps': [
-                    {'range': [0, 50], 'color': 'rgba(255, 0, 0, 0.1)'},
-                    {'range': [50, 70], 'color': 'rgba(255, 255, 0, 0.1)'},
-                    {'range': [70, 100], 'color': 'rgba(0, 255, 0, 0.1)'}
-                ],
-                'threshold': {
-                    'line': {'color': "red", 'width': 4},
-                    'thickness': 0.75,
-                    'value': 90
-                }
-            }
-        ))
-        
-        fig_gauge.update_layout(height=400, font={'size': 16})
-        st.plotly_chart(fig_gauge, use_container_width=True)
-        
-        # Detailed Analysis Sections
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            # Financial Analysis
-            st.markdown("### 💰 Financial Analysis")
+        # Collect all form data
+        form_data = {
+            # Basic Info
+            'company_name': company_name,
+            'founding_year': founding_year,
+            'website': website,
+            'industry': industry,
+            'stage': stage,
+            'location': location,
             
-            financial_metrics = {
-                'Metric': ['LTV/CAC Ratio', 'Burn Multiple', 'Runway', 'Gross Margin', 'Monthly Growth', 'Churn Rate'],
-                'Value': [
-                    f"{metrics['ltv_cac_ratio']:.2f}",
-                    f"{metrics['burn_multiple']:.2f}" if metrics['burn_multiple'] != float('inf') else "N/A",
-                    f"{form_data['runway_months']} months",
-                    f"{form_data['gross_margin']}%",
-                    f"{form_data['monthly_growth_rate']}%",
-                    f"{form_data['churn_rate']}%"
-                ],
-                'Benchmark': ['≥ 3.0', '≤ 2.0', '≥ 18 months', '≥ 70%', '≥ 10%', '≤ 5%'],
-                'Status': [
-                    '✅' if metrics['ltv_cac_ratio'] >= 3 else '❌',
-                    '✅' if metrics['burn_multiple'] <= 2 else '❌',
-                    '✅' if form_data['runway_months'] >= 18 else '❌',
-                    '✅' if form_data['gross_margin'] >= 70 else '❌',
-                    '✅' if form_data['monthly_growth_rate'] >= 10 else '❌',
-                    '✅' if form_data['churn_rate'] <= 5 else '❌'
-                ]
-            }
+            # Business & Product
+            'problem_solution': problem_solution,
+            'market_info': market_info,
+            'tam': tam,
+            'sam': sam,
+            'som': som,
+            'business_model_desc': business_model_desc,
+            'revenue_model': revenue_model,
+            'pricing_model': pricing_model,
+            'uniqueness': uniqueness,
+            'ip_assets': ip_assets,
+            'progress': progress,
             
-            financial_df = pd.DataFrame(financial_metrics)
-            st.dataframe(financial_df, use_container_width=True, hide_index=True)
+            # Team
+            'team_experience': team_experience,
+            'team_structure': team_structure,
+            'team_size': team_size,
+            'technical_team': technical_team,
+            'advisors_count': advisors_count,
+            'team_dynamics': team_dynamics,
+            'hiring_strategy': hiring_strategy,
             
-            # Revenue Projections
-            st.markdown("### 📈 Revenue Trajectory")
+            # Financials
+            'funding_raised': funding_raised,
+            'funding_seeking': funding_seeking,
+            'funding_type': funding_type,
+            'valuation': valuation,
+            'use_of_funds': use_of_funds,
+            'current_mrr': current_mrr,
+            'arr': arr,
+            'burn_rate': burn_rate,
+            'runway_months': runway_months,
+            'gross_margin': gross_margin,
+            'operating_margin': operating_margin,
+            'cac': cac,
+            'ltv': ltv,
+            'revenue_streams': revenue_streams,
+            'revenue_projection_1y': revenue_projection_1y,
+            'revenue_projection_3y': revenue_projection_3y,
+            'profitability_timeline': profitability_timeline,
             
-            years = ['Current', 'Year 1', 'Year 2', 'Year 3']
-            revenues = [
-                form_data['arr'],
-                form_data['revenue_projection_1y'],
-                form_data['revenue_projection_1y'] * 2.5,  # Estimated
-                form_data['revenue_projection_3y']
-            ]
+            # Market & Competition
+            'competitors': competitors,
+            'competitive_advantage': competitive_advantage,
+            'market_growth': market_growth,
+            'customer_acquisition': customer_acquisition,
+            'current_customers': current_customers,
+            'monthly_growth_rate': monthly_growth_rate,
+            'churn_rate': churn_rate,
             
-            fig_revenue = go.Figure()
-            fig_revenue.add_trace(go.Scatter(
-                x=years,
-                y=revenues,
-                mode='lines+markers',
-                name='Revenue',
-                line=dict(color='blue', width=3),
-                marker=dict(size=10)
-            ))
-            
-            # Add annotations
-            for i, (year, revenue) in enumerate(zip(years, revenues)):
-                fig_revenue.add_annotation(
-                    x=year,
-                    y=revenue,
-                    text=f"${revenue/1000000:.1f}M",
-                    showarrow=True,
-                    arrowhead=2,
-                    arrowsize=1,
-                    arrowwidth=2,
-                    arrowcolor="gray",
-                    ax=0,
-                    ay=-40
-                )
-            
-            fig_revenue.update_layout(
-                title="Revenue Growth Projection",
-                xaxis_title="Timeline",
-                yaxis_title="Revenue ($)",
-                showlegend=False,
-                height=400,
-                hovermode='x unified'
-            )
-            
-            st.plotly_chart(fig_revenue, use_container_width=True)
+            # Risks & Strategy
+            'legal_risks': legal_risks,
+            'regulatory_risks': regulatory_risks,
+            'other_risks': other_risks,
+            'exit_strategy': exit_strategy
+        }
         
-        with col2:
-            # Market Analysis
-            st.markdown("### 🌍 Market Opportunity")
-            
-            market_data = {
-                'Market Segment': ['TAM', 'SAM', 'SOM', 'Current Capture'],
-                'Value ($M)': [
-                    form_data['tam'],
-                    form_data['sam'] if form_data['sam'] > 0 else form_data['tam'] * 0.1,
-                    form_data['som'] if form_data['som'] > 0 else form_data['tam'] * 0.01,
-                    form_data['arr'] / 1000000
-                ]
-            }
-            
-            fig_market = go.Figure(data=[
-                go.Bar(
-                    x=market_data['Market Segment'],
-                    y=market_data['Value ($M)'],
-                    text=[f"${v:.0f}M" for v in market_data['Value ($M)']],
-                    textposition='auto',
-                    marker_color=['lightblue', 'blue', 'darkblue', 'green']
-                )
-            ])
-            
-            fig_market.update_layout(
-                title="Market Size Analysis",
-                xaxis_title="Market Segment",
-                yaxis_title="Market Size ($M)",
-                showlegend=False,
-                height=400
-            )
-            
-            st.plotly_chart(fig_market, use_container_width=True)
-            
-            # Competitive Positioning
-            st.markdown("### 🎯 Competitive Positioning")
-            
-            # Simple competitive matrix
-            comp_factors = ['Product Features', 'Market Share', 'Team Strength', 'Funding', 'Technology']
-            company_scores = [85, 20, metrics['team_score'], 60, 80]  # Example scores
-            industry_avg = [70, 50, 60, 65, 70]
-            
-            fig_spider = go.Figure()
-            
-            fig_spider.add_trace(go.Scatterpolar(
-                r=company_scores,
-                theta=comp_factors,
-                fill='toself',
-                name=form_data['company_name']
-            ))
-            
-            fig_spider.add_trace(go.Scatterpolar(
-                r=industry_avg,
-                theta=comp_factors,
-                fill='toself',
-                name='Industry Average'
-            ))
-            
-            fig_spider.update_layout(
-                polar=dict(
-                    radialaxis=dict(
-                        visible=True,
-                        range=[0, 100]
-                    )),
-                showlegend=True,
-                height=400
-            )
-            
-            st.plotly_chart(fig_spider, use_container_width=True)
-        
-        # Pro Mode AI Insights
-        ai_insights = {}  # Initialize ai_insights
-        if st.session_state.mode == "Pro" and st.session_state.api_key:
-            st.markdown("---")
-            st.markdown("## 🤖 AI-Powered Investment Analysis")
-            
-            with st.spinner("Generating comprehensive AI insights..."):
-                ai_insights = generate_ai_insights(form_data, st.session_state.api_key)
-            
-            if "error" not in ai_insights:
-                # Investment Recommendation
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    st.markdown("### 📋 Investment Thesis")
-                    st.info(ai_insights.get('investment_thesis', 'No thesis generated'))
-                with col2:
-                    st.markdown("### 🎯 Recommendation")
-                    rec = ai_insights.get('investment_recommendation', 'HOLD')
-                    rec_color = {"STRONG BUY": "🟢", "BUY": "🟢", "HOLD": "🟡", "PASS": "🔴"}.get(rec.split()[0], "⚪")
-                    st.markdown(f"# {rec_color} {rec.split()[0]}")
-                
-                # Detailed Analysis
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.markdown("### ✅ Key Strengths")
-                    strengths = ai_insights.get('key_strengths', [])
-                    for strength in strengths:
-                        st.markdown(f"• {strength}")
-                    
-                    st.markdown("### 📊 Growth Potential")
-                    st.write(ai_insights.get('growth_potential', 'No assessment available'))
-                    
-                    st.markdown("### 👥 Team Assessment")
-                    st.write(ai_insights.get('team_assessment', 'No assessment available'))
-                
-                with col2:
-                    st.markdown("### ⚠️ Key Concerns")
-                    concerns = ai_insights.get('key_concerns', [])
-                    for concern in concerns:
-                        st.markdown(f"• {concern}")
-                    
-                    st.markdown("### 🎯 Competitive Position")
-                    st.write(ai_insights.get('competitive_position', 'No assessment available'))
-                    
-                    st.markdown("### ⏰ Market Timing")
-                    st.write(ai_insights.get('market_timing', 'No assessment available'))
-                
-                # Due Diligence & Next Steps
-                st.markdown("### 🔍 Due Diligence Priorities")
-                dd_priorities = ai_insights.get('due_diligence_priorities', [])
-                cols = st.columns(len(dd_priorities))
-                for i, priority in enumerate(dd_priorities):
-                    with cols[i]:
-                        st.info(f"**Priority {i+1}:**\n{priority}")
-                
-                # Investment Terms
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.markdown("### 💰 Valuation Assessment")
-                    st.write(ai_insights.get('valuation_assessment', 'No assessment available'))
-                
-                with col2:
-                    st.markdown("### 📜 Recommended Terms")
-                    st.write(ai_insights.get('recommended_terms', 'No recommendations available'))
-                
-                with col3:
-                    st.markdown("### 🤝 Post-Investment Support")
-                    support_areas = ai_insights.get('post_investment_support', [])
-                    for area in support_areas:
-                        st.markdown(f"• {area}")
-                
-                # Risk Assessment
-                st.markdown("### ⚠️ Risk Assessment")
-                risk_level = ai_insights.get('risk_assessment', 'MEDIUM')
-                risk_color = {"LOW": "success", "MEDIUM": "warning", "HIGH": "error"}.get(risk_level.split()[0], "info")
-                st.markdown(f":{risk_color}[{risk_level}]")
-                
-                # Comparable Exits
-                st.markdown("### 🚀 Comparable Exits")
-                st.info(ai_insights.get('comparable_exits', 'No comparable data available'))
-                
-            else:
-                st.error(ai_insights['error'])
-        
-        # Recommendations Section (for both modes)
-        st.markdown("---")
-        st.markdown("## 💡 Action Items & Recommendations")
-        
-        recommendations = []
-        
-        # Financial recommendations
-        if metrics['ltv_cac_ratio'] < 3:
-            recommendations.append({
-                'area': 'Unit Economics',
-                'issue': f"LTV/CAC ratio is {metrics['ltv_cac_ratio']:.1f} (below 3.0 benchmark)",
-                'action': "Focus on improving customer retention and reducing acquisition costs"
-            })
-        
-        if form_data['runway_months'] < 18:
-            recommendations.append({
-                'area': 'Financial Health',
-                'issue': f"Runway is only {form_data['runway_months']} months",
-                'action': "Extend runway to 18-24 months through fundraising or burn reduction"
-            })
-        
-        if form_data['gross_margin'] < 70:
-            recommendations.append({
-                'area': 'Business Model',
-                'issue': f"Gross margin is {form_data['gross_margin']}% (below SaaS benchmark)",
-                'action': "Optimize pricing strategy and reduce COGS to improve margins"
-            })
-        
-        if form_data['monthly_growth_rate'] < 10:
-            recommendations.append({
-                'area': 'Growth',
-                'issue': f"Monthly growth rate is {form_data['monthly_growth_rate']}%",
-                'action': "Accelerate growth through improved sales/marketing efficiency"
-            })
-        
-        if form_data['churn_rate'] > 5:
-            recommendations.append({
-                'area': 'Customer Retention',
-                'issue': f"Monthly churn rate is {form_data['churn_rate']}%",
-                'action': "Implement customer success initiatives to reduce churn below 5%"
-            })
-        
-        if not recommendations:
-            st.success("🎉 Congratulations! Your metrics are strong across all key areas. Focus on execution and scaling.")
-        else:
-            for rec in recommendations:
-                with st.expander(f"🔧 {rec['area']}: {rec['issue']}"):
-                    st.write(f"**Recommended Action:** {rec['action']}")
-        
-        # Export Report
-        st.markdown("---")
-        st.markdown("### 📥 Export Analysis Report")
-        
-        # Generate PDF report
-        with st.spinner("Generating PDF report..."):
+        # Check and process URLs in text fields (Pro mode only)
+        if st.session_state.mode == "Pro":
             try:
-                pdf_data = generate_pdf_report(
-                    form_data=form_data,
-                    metrics=metrics,
-                    ai_insights=ai_insights if st.session_state.mode == "Pro" and "error" not in ai_insights else None,
-                    recommendations=recommendations
-                )
-                
-                st.download_button(
-                    label="📄 Download Professional PDF Report",
-                    data=pdf_data,
-                    file_name=f"investment_analysis_{form_data['company_name']}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
-                    mime="application/pdf",
-                    help="Download a comprehensive PDF report with all analysis, metrics, and recommendations"
-                )
-                
+                with st.expander("📎 URL Content Detection", expanded=False):
+                    st.info("Pro mode can fetch content from URLs in your responses. Processing...")
+                    
+                    urls_found = False
+                    for field in url_fields_to_check:
+                        if field in form_data and form_data[field]:
+                            if is_valid_url(form_data[field]):
+                                urls_found = True
+                                original_content = form_data[field]
+                                enhanced_content = process_text_with_urls(original_content)
+                                form_data[field] = enhanced_content
+                                
+                                # Show what URLs were processed
+                                urls = extract_urls_from_text(original_content)
+                                st.success(f"✓ Fetched content from {len(urls)} URL(s) in {field.replace('_', ' ').title()}")
+                    
+                    if not urls_found:
+                        st.info("No URLs detected in text fields.")
             except Exception as e:
-                st.error(f"Error generating PDF: {str(e)}")
+                st.warning("⚠️ URL content fetching encountered an issue. Proceeding with manual input only.")
+        
+        # Process uploaded documents
+        uploaded_docs = {}
+        doc_mapping = {
+            'problem_doc': problem_doc,
+            'market_doc': market_doc,
+            'business_plan_doc': business_plan_doc,
+            'team_doc': team_doc,
+            'financial_doc': financial_doc,
+            'competitive_doc': competitive_analysis_doc,
+            'additional_doc': additional_doc
+        }
+        
+        for doc_name, doc_file in doc_mapping.items():
+            if doc_file is not None:
+                uploaded_docs[doc_name] = process_uploaded_file(doc_file)
+        
+        form_data['uploaded_docs'] = uploaded_docs
+        
+        # Validation
+        required_fields = ['company_name', 'problem_solution', 'market_info', 'business_model_desc',
+                          'uniqueness', 'team_experience', 'team_structure', 'funding_seeking',
+                          'use_of_funds', 'cac', 'ltv', 'burn_rate', 'runway_months',
+                          'competitors', 'competitive_advantage', 'customer_acquisition', 'other_risks']
+        
+        missing_fields = [field for field in required_fields if not form_data.get(field)]
+        
+        if missing_fields:
+            st.error(f"Please fill in all required fields: {', '.join(missing_fields)}")
+        else:
+            # Calculate metrics
+            st.markdown("---")
+            st.header("📊 Comprehensive Analysis Results")
+            
+            metrics = calculate_comprehensive_metrics(form_data)
+            
+            # Display key metrics dashboard
+            st.subheader("🎯 Key Performance Indicators")
+            
+            col1, col2, col3, col4, col5, col6 = st.columns(6)
+            
+            with col1:
+                st.metric("LTV/CAC Ratio", f"{metrics['ltv_cac_ratio']:.2f}", 
+                         "✅ Good" if metrics['ltv_cac_ratio'] >= 3 else "⚠️ Needs Work")
+            
+            with col2:
+                st.metric("Efficiency Score", f"{metrics['efficiency_score']:.0f}/100")
+            
+            with col3:
+                st.metric("Growth Score", f"{metrics['growth_score']:.0f}/100")
+            
+            with col4:
+                st.metric("Market Score", f"{metrics['market_score']:.0f}/100")
+            
+            with col5:
+                st.metric("Team Score", f"{metrics['team_score']:.0f}/100")
+            
+            with col6:
+                st.metric("Traction Score", f"{metrics['traction_score']:.0f}/100")
+            
+            # Overall Investment Score
+            st.markdown("### 🏆 Overall Investment Score")
+            
+            score_color = "green" if metrics['overall_score'] >= 70 else "orange" if metrics['overall_score'] >= 50 else "red"
+            
+            fig_gauge = go.Figure(go.Indicator(
+                mode = "gauge+number+delta",
+                value = metrics['overall_score'],
+                domain = {'x': [0, 1], 'y': [0, 1]},
+                title = {'text': "Investment Readiness Score", 'font': {'size': 24}},
+                delta = {'reference': 70, 'increasing': {'color': "green"}},
+                gauge = {
+                    'axis': {'range': [None, 100], 'tickwidth': 1, 'tickcolor': "darkblue"},
+                    'bar': {'color': score_color},
+                    'bgcolor': "white",
+                    'borderwidth': 2,
+                    'bordercolor': "gray",
+                    'steps': [
+                        {'range': [0, 50], 'color': 'rgba(255, 0, 0, 0.1)'},
+                        {'range': [50, 70], 'color': 'rgba(255, 255, 0, 0.1)'},
+                        {'range': [70, 100], 'color': 'rgba(0, 255, 0, 0.1)'}
+                    ],
+                    'threshold': {
+                        'line': {'color': "red", 'width': 4},
+                        'thickness': 0.75,
+                        'value': 90
+                    }
+                }
+            ))
+            
+            fig_gauge.update_layout(height=400, font={'size': 16})
+            st.plotly_chart(fig_gauge, use_container_width=True)
+            
+            # Detailed Analysis Sections
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Financial Analysis
+                st.markdown("### 💰 Financial Analysis")
                 
-                # Fallback to text report
-                report_date = datetime.now().strftime('%Y-%m-%d %H:%M')
+                financial_metrics = {
+                    'Metric': ['LTV/CAC Ratio', 'Burn Multiple', 'Runway', 'Gross Margin', 'Monthly Growth', 'Churn Rate'],
+                    'Value': [
+                        f"{metrics['ltv_cac_ratio']:.2f}",
+                        f"{metrics['burn_multiple']:.2f}" if metrics['burn_multiple'] != float('inf') else "N/A",
+                        f"{form_data['runway_months']} months",
+                        f"{form_data['gross_margin']}%",
+                        f"{form_data['monthly_growth_rate']}%",
+                        f"{form_data['churn_rate']}%"
+                    ],
+                    'Benchmark': ['≥ 3.0', '≤ 2.0', '≥ 18 months', '≥ 70%', '≥ 10%', '≤ 5%'],
+                    'Status': [
+                        '✅' if metrics['ltv_cac_ratio'] >= 3 else '❌',
+                        '✅' if metrics['burn_multiple'] <= 2 else '❌',
+                        '✅' if form_data['runway_months'] >= 18 else '❌',
+                        '✅' if form_data['gross_margin'] >= 70 else '❌',
+                        '✅' if form_data['monthly_growth_rate'] >= 10 else '❌',
+                        '✅' if form_data['churn_rate'] <= 5 else '❌'
+                    ]
+                }
                 
-                report = f"""
+                financial_df = pd.DataFrame(financial_metrics)
+                st.dataframe(financial_df, use_container_width=True, hide_index=True)
+                
+                # Revenue Projections
+                st.markdown("### 📈 Revenue Trajectory")
+                
+                years = ['Current', 'Year 1', 'Year 2', 'Year 3']
+                revenues = [
+                    form_data['arr'],
+                    form_data['revenue_projection_1y'],
+                    form_data['revenue_projection_1y'] * 2.5,  # Estimated
+                    form_data['revenue_projection_3y']
+                ]
+                
+                fig_revenue = go.Figure()
+                fig_revenue.add_trace(go.Scatter(
+                    x=years,
+                    y=revenues,
+                    mode='lines+markers',
+                    name='Revenue',
+                    line=dict(color='blue', width=3),
+                    marker=dict(size=10)
+                ))
+                
+                # Add annotations
+                for i, (year, revenue) in enumerate(zip(years, revenues)):
+                    fig_revenue.add_annotation(
+                        x=year,
+                        y=revenue,
+                        text=f"${revenue/1000000:.1f}M",
+                        showarrow=True,
+                        arrowhead=2,
+                        arrowsize=1,
+                        arrowwidth=2,
+                        arrowcolor="gray",
+                        ax=0,
+                        ay=-40
+                    )
+                
+                fig_revenue.update_layout(
+                    title="Revenue Growth Projection",
+                    xaxis_title="Timeline",
+                    yaxis_title="Revenue ($)",
+                    showlegend=False,
+                    height=400,
+                    hovermode='x unified'
+                )
+                
+                st.plotly_chart(fig_revenue, use_container_width=True)
+            
+            with col2:
+                # Market Analysis
+                st.markdown("### 🌍 Market Opportunity")
+                
+                market_data = {
+                    'Market Segment': ['TAM', 'SAM', 'SOM', 'Current Capture'],
+                    'Value ($M)': [
+                        form_data['tam'],
+                        form_data['sam'] if form_data['sam'] > 0 else form_data['tam'] * 0.1,
+                        form_data['som'] if form_data['som'] > 0 else form_data['tam'] * 0.01,
+                        form_data['arr'] / 1000000
+                    ]
+                }
+                
+                fig_market = go.Figure(data=[
+                    go.Bar(
+                        x=market_data['Market Segment'],
+                        y=market_data['Value ($M)'],
+                        text=[f"${v:.0f}M" for v in market_data['Value ($M)']],
+                        textposition='auto',
+                        marker_color=['lightblue', 'blue', 'darkblue', 'green']
+                    )
+                ])
+                
+                fig_market.update_layout(
+                    title="Market Size Analysis",
+                    xaxis_title="Market Segment",
+                    yaxis_title="Market Size ($M)",
+                    showlegend=False,
+                    height=400
+                )
+                
+                st.plotly_chart(fig_market, use_container_width=True)
+                
+                # Competitive Positioning
+                st.markdown("### 🎯 Competitive Positioning")
+                
+                # Simple competitive matrix
+                comp_factors = ['Product Features', 'Market Share', 'Team Strength', 'Funding', 'Technology']
+                company_scores = [85, 20, metrics['team_score'], 60, 80]  # Example scores
+                industry_avg = [70, 50, 60, 65, 70]
+                
+                fig_spider = go.Figure()
+                
+                fig_spider.add_trace(go.Scatterpolar(
+                    r=company_scores,
+                    theta=comp_factors,
+                    fill='toself',
+                    name=form_data['company_name']
+                ))
+                
+                fig_spider.add_trace(go.Scatterpolar(
+                    r=industry_avg,
+                    theta=comp_factors,
+                    fill='toself',
+                    name='Industry Average'
+                ))
+                
+                fig_spider.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True,
+                            range=[0, 100]
+                        )),
+                    showlegend=True,
+                    height=400
+                )
+                
+                st.plotly_chart(fig_spider, use_container_width=True)
+            
+            # Pro Mode AI Insights
+            ai_insights = {}  # Initialize ai_insights
+            if st.session_state.mode == "Pro" and st.session_state.api_key:
+                st.markdown("---")
+                st.markdown("## 🤖 AI-Powered Investment Analysis")
+                
+                with st.spinner("Generating comprehensive AI insights..."):
+                    try:
+                        ai_insights = generate_ai_insights(form_data, st.session_state.api_key)
+                        
+                        if "error" in ai_insights:
+                            st.error(f"⚠️ {ai_insights['error']}")
+                            ai_insights = {}  # Reset to empty dict
+                        else:
+                            # Investment Recommendation
+                            col1, col2 = st.columns([2, 1])
+                            with col1:
+                                st.markdown("### 📋 Investment Thesis")
+                                st.info(ai_insights.get('investment_thesis', 'No thesis generated'))
+                            with col2:
+                                st.markdown("### 🎯 Recommendation")
+                                rec = ai_insights.get('investment_recommendation', 'HOLD')
+                                rec_color = {"STRONG BUY": "🟢", "BUY": "🟢", "HOLD": "🟡", "PASS": "🔴"}.get(rec.split()[0], "⚪")
+                                st.markdown(f"# {rec_color} {rec.split()[0]}")
+                            
+                            # Detailed Analysis
+                            col1, col2 = st.columns(2)
+                            
+                            with col1:
+                                st.markdown("### ✅ Key Strengths")
+                                strengths = ai_insights.get('key_strengths', [])
+                                for strength in strengths:
+                                    st.markdown(f"• {strength}")
+                                
+                                st.markdown("### 📊 Growth Potential")
+                                st.write(clean_markdown(ai_insights.get('growth_potential', 'No assessment available')))
+                                
+                                st.markdown("### 👥 Team Assessment")
+                                st.write(clean_markdown(ai_insights.get('team_assessment', 'No assessment available')))
+                            
+                            with col2:
+                                st.markdown("### ⚠️ Key Concerns")
+                                concerns = ai_insights.get('key_concerns', [])
+                                for concern in concerns:
+                                    st.markdown(f"• {concern}")
+                                
+                                st.markdown("### 🎯 Competitive Position")
+                                st.write(clean_markdown(ai_insights.get('competitive_position', 'No assessment available')))
+                                
+                                st.markdown("### ⏰ Market Timing")
+                                st.write(ai_insights.get('market_timing', 'No assessment available'))
+                            
+                            # Due Diligence & Next Steps
+                            st.markdown("### 🔍 Due Diligence Priorities")
+                            dd_priorities = ai_insights.get('due_diligence_priorities', [])
+                            cols = st.columns(len(dd_priorities) if dd_priorities else 1)
+                            for i, priority in enumerate(dd_priorities):
+                                with cols[i]:
+                                    st.info(f"**Priority {i+1}:**\n{priority}")
+                            
+                            # Investment Terms
+                            col1, col2, col3 = st.columns(3)
+                            
+                            with col1:
+                                st.markdown("### 💰 Valuation Assessment")# Remove markdown formatting from the text
+                                st.text(ai_insights.get('valuation_assessment', 'No assessment available'))
+                            
+                            with col2:
+                                st.markdown("### 📜 Recommended Terms")
+                                st.write(clean_markdown(ai_insights.get('recommended_terms', 'No recommendations available')))
+                            
+                            with col3:
+                                st.markdown("### 🤝 Post-Investment Support")
+                                support_areas = ai_insights.get('post_investment_support', [])
+                                for area in support_areas:
+                                    st.markdown(f"• {area}")
+                            
+                            # Risk Assessment
+                            st.markdown("### ⚠️ Risk Assessment")
+                            risk_level = ai_insights.get('risk_assessment', 'MEDIUM')
+                            risk_color = {"LOW": "success", "MEDIUM": "warning", "HIGH": "error"}.get(risk_level.split()[0], "info")
+                            st.write(risk_level)
+                            
+                            # Comparable Exits
+                            st.markdown("### 🚀 Comparable Exits")
+                            st.info(ai_insights.get('comparable_exits', 'No comparable data available'))
+                            
+                    except Exception as e:
+                        st.error("⚠️ Unable to generate AI insights. Please check your API key and try again.")
+                        ai_insights = {}
+                        # Log error for debugging (optional)
+                        print(f"AI Error: {str(e)}")
+            
+            # Recommendations Section (for both modes)
+            st.markdown("---")
+            st.markdown("## 💡 Action Items & Recommendations")
+            
+            recommendations = []
+            
+            # Financial recommendations
+            if metrics['ltv_cac_ratio'] < 3:
+                recommendations.append({
+                    'area': 'Unit Economics',
+                    'issue': f"LTV/CAC ratio is {metrics['ltv_cac_ratio']:.1f} (below 3.0 benchmark)",
+                    'action': "Focus on improving customer retention and reducing acquisition costs"
+                })
+            
+            if form_data['runway_months'] < 18:
+                recommendations.append({
+                    'area': 'Financial Health',
+                    'issue': f"Runway is only {form_data['runway_months']} months",
+                    'action': "Extend runway to 18-24 months through fundraising or burn reduction"
+                })
+            
+            if form_data['gross_margin'] < 70:
+                recommendations.append({
+                    'area': 'Business Model',
+                    'issue': f"Gross margin is {form_data['gross_margin']}% (below SaaS benchmark)",
+                    'action': "Optimize pricing strategy and reduce COGS to improve margins"
+                })
+            
+            if form_data['monthly_growth_rate'] < 10:
+                recommendations.append({
+                    'area': 'Growth',
+                    'issue': f"Monthly growth rate is {form_data['monthly_growth_rate']}%",
+                    'action': "Accelerate growth through improved sales/marketing efficiency"
+                })
+            
+            if form_data['churn_rate'] > 5:
+                recommendations.append({
+                    'area': 'Customer Retention',
+                    'issue': f"Monthly churn rate is {form_data['churn_rate']}%",
+                    'action': "Implement customer success initiatives to reduce churn below 5%"
+                })
+            
+            if not recommendations:
+                st.success("🎉 Congratulations! Your metrics are strong across all key areas. Focus on execution and scaling.")
+            else:
+                for rec in recommendations:
+                    with st.expander(f"🔧 {rec['area']}: {rec['issue']}"):
+                        st.write(f"**Recommended Action:** {rec['action']}")
+            
+            # Export Report
+            st.markdown("---")
+            st.markdown("### 📥 Export Analysis Report")
+            
+            # Generate PDF report
+            with st.spinner("Generating PDF report..."):
+                try:
+                    pdf_data = generate_pdf_report(
+                        form_data=form_data,
+                        metrics=metrics,
+                        ai_insights=ai_insights if st.session_state.mode == "Pro" and "error" not in ai_insights else None,
+                        recommendations=recommendations
+                    )
+                    
+                    st.download_button(
+                        label="📄 Download Professional PDF Report",
+                        data=pdf_data,
+                        file_name=f"investment_analysis_{form_data['company_name']}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                        mime="application/pdf",
+                        help="Download a comprehensive PDF report with all analysis, metrics, and recommendations"
+                    )
+                    
+                except Exception as e:
+                    st.warning("⚠️ PDF generation encountered an issue. You can download the text version below.")
+                    
+                    # Fallback to text report
+                    report_date = datetime.now().strftime('%Y-%m-%d %H:%M')
+                    
+                    report = f"""
 # INVESTMENT ANALYSIS REPORT
 # {form_data['company_name']}
 Generated: {report_date}
@@ -1584,21 +1738,25 @@ Funding Seeking: ${form_data['funding_seeking']:,.0f}
 
 ## KEY RECOMMENDATIONS
 """
-                for rec in recommendations:
-                    report += f"\n### {rec['area']}\n"
-                    report += f"- Issue: {rec['issue']}\n"
-                    report += f"- Action: {rec['action']}\n"
-                
-                if st.session_state.mode == "Pro" and "error" not in ai_insights:
-                    report += f"\n## AI INVESTMENT THESIS\n{ai_insights.get('investment_thesis', 'N/A')}\n"
-                    report += f"\n## AI RECOMMENDATION\n{ai_insights.get('investment_recommendation', 'N/A')}\n"
-                
-                st.download_button(
-                    label="📥 Download Text Report (Fallback)",
-                    data=report,
-                    file_name=f"investment_analysis_{form_data['company_name']}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
-                    mime="text/plain"
-                )
+                    for rec in recommendations:
+                        report += f"\n### {rec['area']}\n"
+                        report += f"- Issue: {rec['issue']}\n"
+                        report += f"- Action: {rec['action']}\n"
+                    
+                    if st.session_state.mode == "Pro" and "error" not in ai_insights:
+                        report += f"\n## AI INVESTMENT THESIS\n{ai_insights.get('investment_thesis', 'N/A')}\n"
+                        report += f"\n## AI RECOMMENDATION\n{ai_insights.get('investment_recommendation', 'N/A')}\n"
+                    
+                    st.download_button(
+                        label="📥 Download Text Report (Fallback)",
+                        data=report,
+                        file_name=f"investment_analysis_{form_data['company_name']}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                        mime="text/plain"
+                    )
+                    
+    except Exception as e:
+        st.error("⚠️ An unexpected error occurred while processing your submission. Please try again.")
+        print(f"Form processing error: {str(e)}")  # For debugging
 
 # Footer
 st.markdown("---")
