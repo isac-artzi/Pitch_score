@@ -25,6 +25,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 
 
+
 def clean_markdown(text):
     """Remove markdown formatting that causes display issues"""
     if not text:
@@ -815,8 +816,9 @@ if 'uploaded_docs' not in st.session_state:
     st.session_state.uploaded_docs = {}
 
 # Header
-st.title("🚀 Investor Proposal Vetting Tool")
+st.title("Investor Proposal Vetting Tool")
 st.subheader("Comprehensive analysis for startup evaluation")
+st.markdown("##### Copyright © 2023 - All Rights Reserved - Isac Artzi & SenSym, LLC")
 st.caption("Make data-driven investment decisions with confidence")
 
 # Privacy Notice Popup
@@ -1758,12 +1760,26 @@ Funding Seeking: ${form_data['funding_seeking']:,.0f}
         st.error("⚠️ An unexpected error occurred while processing your submission. Please try again.")
         print(f"Form processing error: {str(e)}")  # For debugging
 
+
+st.markdown("---")
+st.markdown("""
+**Contact & Connect**  
+📧 Email: [iartzi@sensym.ai](mailto:iartzi@sensym.ai)  
+🌐 Website: [www.sensym.ai](https://www.sensym.ai)  
+💼 LinkedIn: [Connect with me](https://www.linkedin.com/in/isacartzi/)
+""")
+st.markdown("""
+**Disclaimer**  
+This tool is for informational purposes only and should not be used as a substitute for professional advice. SenSym, LLC does not provide investment advice or recommendations. The information provided is based on publicly available data and may not reflect the latest developments in the market. SenSym, LLC is not responsible for any losses incurred by users of this tool. Users should conduct their own due diligence before making any investment decisions. SenSym, LLC reserves the right to modify or discontinue this tool at any time without notice. SenSym, LLC is not responsible for any damages or losses arising from the use of this tool.
+""")
+
 # Footer
 st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; color: #666; padding: 20px;'>
-        <p>🚀 Built for entrepreneurs and investors to make data-driven decisions</p>
+        <p>Built for entrepreneurs and investors to make data-driven decisions</p>
+        <p>© 2025 - All Rights Reserved</p> SenSym, LLC</p>
         <p style='font-size: 12px;'>This tool provides guidance only. Always conduct thorough due diligence.</p>
     </div>
     """,
