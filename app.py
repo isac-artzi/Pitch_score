@@ -815,6 +815,26 @@ if 'form_data' not in st.session_state:
 if 'uploaded_docs' not in st.session_state:
     st.session_state.uploaded_docs = {}
 
+
+import base64
+
+# Add this function at the top of your file (after imports)
+def get_base64_of_video(video_file):
+    try:
+        with open(video_file, "rb") as f:
+            data = f.read()
+        return base64.b64encode(data).decode()
+    except FileNotFoundError:
+        st.error(f"Video file '{video_file}' not found!")
+        return None
+    
+
+
+
+# Small video player with exact dimensions
+st.video("https://youtu.be/ZSdXUD5B8NE", width=300)
+
+
 # Header
 st.title("Investor Proposal Vetting Tool")
 st.subheader("Comprehensive analysis for startup evaluation")
