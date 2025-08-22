@@ -401,8 +401,9 @@ def generate_ai_insights(data, api_key):
                 all_text += f"\n\n{doc_type.upper()} DOCUMENT CONTENT:\n{content[:2000]}..."
         
         prompt = f"""
-        You are a seasoned venture capital investment partner analyzing a startup proposal. 
-        Based on the comprehensive information provided, generate a detailed investment analysis.
+        You are a seasoned, very cautious, venture capital investment partner analyzing a startup proposal. 
+        Based on the comprehensive information provided, generate a detailed investment analysis. 
+        Be critical and unforgiving, unless the proposal is truly outstanding.
         
         {all_text}
         
@@ -436,7 +437,7 @@ def generate_ai_insights(data, api_key):
             messages=[
                 {
                     'role': 'system', 
-                    'content': 'You are a venture capital investment assistant. You must always respond with valid JSON only, no markdown formatting, no code blocks, no explanations.'
+                    'content': 'You are a cautious, critical, venture capital investment assistant. You must always respond with valid JSON only, no markdown formatting, no code blocks, no explanations.'
                 },
                 {
                     'role': 'user', 

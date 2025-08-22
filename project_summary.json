@@ -1,0 +1,38 @@
+{
+  "inputs": [
+    "number_input",
+    "text_input",
+    "text_area",
+    "file_uploader",
+    "selectbox"
+  ],
+  "openai_usage": [],
+  "processing_functions": [
+    "clean_markdown",
+    "extract_text_from_pdf",
+    "extract_text_from_docx",
+    "extract_text_from_txt",
+    "process_uploaded_file",
+    "is_valid_url",
+    "extract_urls_from_text",
+    "fetch_url_content",
+    "process_text_with_urls",
+    "calculate_comprehensive_metrics",
+    "generate_ai_insights",
+    "generate_pdf_report",
+    "get_base64_of_video"
+  ],
+  "output_generation_calls": [],
+  "dependencies": [
+    "streamlit",
+    "pandas",
+    "numpy",
+    "plotly",
+    "openai>=1.0.0",
+    "pypdf",
+    "python-docx",
+    "reportlab",
+    "requests",
+    "beautifulsoup4"
+  ]
+}
